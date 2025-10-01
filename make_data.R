@@ -4,9 +4,6 @@
 #   long-term controls
 #---------------------------
 
-
-
-
 library(lubridate)
 library(portalr)
 library(portalcasting)
@@ -14,7 +11,13 @@ library(fabletools)
 library(tsibble)
 library(tidyverse)
 
+###### Functions
+
 download_observations(
+  # loads up the Portal Data in your working folder.
+  # this doesn't need to be run everytime unless you
+  # are updating with newest data
+  
   path = ".",
   version = "latest",
   source = "github",
@@ -27,6 +30,8 @@ download_observations(
 
 calc_diff = function(data){
   # calculate time difference between rows
+  # used to find skipped censuses or two censuses
+  # in one month.
   # requires data$month column in a date format
   # returns dataframe with time difference column
   
@@ -36,10 +41,26 @@ calc_diff = function(data){
   return(data)
 }
 
-### RODENT DATA
+cleanup_dataframe = function(data, type="rodent"){
+  #  basic data frame clean up which differs between the rodent data and the
+  # NDVI and weather data
+  
+  if(type=="rodent"){
+    data = data |> filter(drop !="drop") |> select(!drop)
+    data = data |> mutate(month = yearmonth(month))
+  }
+  data = data |> mutate(nmonth=month(month),year = year(month), time=row_number() )
+  return(data)  
+}
+
+### rodent data functions
 get_rodent_data = function(currency, lt_trt){
-  # extracts long-term control plots (4, 11, 14, 17) for every species, need min_plots because plot
-  # 24 is missing in early years. This combo will give us the missing newmoon months.
+  # generates monthly cleaned data for all species on long-term plots (controls:4, 11, 14, 17  
+  # or krat treatments:). Can specify abundance or energy use. 
+
+  # summarize_rodent_data needs min_plots because plot 24 is missing in early years. 
+  # download_if_missing will insert the missing newmoon months into the data frame.
+  # even though there is no data so we can interpolate the missing info in later steps
   
   abundance_data <- portalr::summarize_rodent_data(path = ".", 
                                                    clean = FALSE,
@@ -58,8 +79,11 @@ get_rodent_data = function(currency, lt_trt){
                                                    download_if_missing = TRUE,
                                                    quiet=FALSE)
   
-  # missing censuses need treatment added, first three censuses have more plots, adjusts counts
-  # by number of plots sampled, formats date
+  # for missing censuses, need to change NA for treatment to treatment data being 
+  # generated.
+  # first three censuses have more control plots so these are dropped
+  # selects for the treatment passed to get_rodent_data()
+  # adjusts counts by number of plots actually sampled
     rodent_abundance = abundance_data |> 
     replace_na(list(treatment=lt_trt)) |>
     filter(newmoonnumber > 3)|> 
@@ -77,9 +101,15 @@ get_rodent_data = function(currency, lt_trt){
 }
 
 make_yearmonth_gaps = function(data, filename){
-  # needs output from get_rodent_data() to find gaps and multiple samples/month
-  # in time series
-  # requires data with columns: month, newmoonnumber, nplots censusdate
+  # because of not-quite-monthly sampling. We need output to find gaps and 
+  # multiple samples/month. This is so we can adjust the 'month' of sampling to
+  # the month that the sampling event was intended to sample. Writes to files
+  # where this is done by hand. This function is only needed if adj_yearmonths.csv 
+  # does not already exist (i.e. this generates the precursor file that is then
+  # adjusted to make adj_yearmonths.csv). Once adj_yearmonths.csv exists, there 
+  # is a different process for updating that file by hand.
+
+  # function requires data with columns: month, newmoonnumber, nplots censusdate
   # month column must be in yearmonth format
   
   match_yearmonths = calc_diff(data) |> select(newmoonnumber, nplots, censusdate, month, mo_diff)
@@ -95,23 +125,33 @@ merge_newmonths = function(data, filename){
   return(month_abundance)
 }
 
-
-cleanup_dataframe = function(data, type="rodent"){
-   if(type=="rodent"){
-     data = data |> filter(drop !="drop") |> select(!drop)
-   }
-  data = data |> mutate(nmonth=month(month),year = year(month), time=row_number() )
-return(data)  
-}
+######## Data generating scripts
 
 # Make control data
 control_data = get_rodent_data("abundance", "control")
 # write.csv(rodent_data, "raw_rodents.csv") # used for generate_adj_yearmonths_file.R
+
+# Before running next step, update adj_yearmonth.csv.
+# 1. Open control_data and compare newest dates with adj_yearmonth.csv
+# 2. If newer dates in control_data, then add to adj_yearmonth.csv:
+#  * newmoonnumber
+#  * Census date: first night census date, 
+#  * month: Year Mon(th) that census should be (i.e. was this the second trip in a month?
+#       should this be the next month's census?)
+#  * mo_diff: how many months since the previous census? 1 would be Aug then Sep,
+#             2 would be Aug then Oct, 0 would be Aug then Aug.
+#  * drop: sometimes two censuses do just occur in the same month. i.e. census pattern:
+#             Aug Sep Sep Oct Nov... The second census isn't the Oct census because 
+#             we trapped in Oct. Nor is the first one the August census, because we 
+#             trapped then too. In that case, type "drop" to drop the second census 
+#             in the month.
+
 monthly_data = merge_newmonths(control_data, "adj_yearmonths.csv")
 output = cleanup_dataframe(monthly_data, "rodent")
 write.csv(output, "N_timeseries_control.csv", row.names = FALSE) # output file for analysis
 
 # Make control energy data
+
 controlE_data = get_rodent_data("energy", "control")
 # write.csv(rodent_data, "raw_rodents.csv") # used for generate_adj_yearmonths_file.R
 monthlyE_data = merge_newmonths(controlE_data, "adj_yearmonths.csv")
@@ -125,6 +165,7 @@ exclosure_data = get_rodent_data("abundance", "exclosure")
 monthly_data = merge_newmonths(exclosure_data, "adj_yearmonths.csv")
 output = cleanup_dataframe(monthly_data, "rodent")
 write.csv(output, "N_timeseries_exclosure.csv", row.names = FALSE) # output file for analysis
+
 ### NDVI DATA
 
 get_ndvi_data = function(filename){
